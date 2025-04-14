@@ -65,7 +65,7 @@ def pytest_load_initial_conftests(early_config, parser, args):
             if not cov_plugin:
                 return
             # matching: coverage run --source (package) --parallel-mode
-            coverage_pat = re.compile('coverage run --source (\w+) --parallel-mode')
+            coverage_pat = re.compile(r'coverage run --source (\w+) --parallel-mode')
             match = coverage_pat.match(python_env)
             cov_args = args + ['--cov']
             if match:
