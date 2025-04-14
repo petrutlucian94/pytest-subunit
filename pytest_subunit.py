@@ -37,9 +37,9 @@ def pytest_deselected(items):
 def pytest_addoption(parser):
     group = parser.getgroup("terminal reporting", "reporting", after="general")
     group._addoption(
-        '--subunit', action="store_true", dest="subunit", default=False,
+        '--subunit-path', dest="subunit", default=None,
         help=(
-            "enable pytest-subunit"
+            "enable pytest-subunit and write to the specified file"
         )
     )
     group._addoption(
@@ -78,91 +78,63 @@ def pytest_load_initial_conftests(early_config, parser, args):
 @pytest.mark.trylast
 def pytest_configure(config):
     if config.option.subunit:
-        # Get the standard terminal reporter plugin and replace it with our
+        # Get the standard terminal reporter plugin and replace it with ours.
         standard_reporter = config.pluginmanager.getplugin('terminalreporter')
-        subunit_reporter = SubunitTerminalReporter(standard_reporter)
+        subunit_reporter = SubunitTerminalReporter(standard_reporter, config.option.subunit)
         config.pluginmanager.unregister(standard_reporter)
         config.pluginmanager.register(subunit_reporter, 'terminalreporter')
 
 
-_ZERO = datetime.timedelta(0)
-
-class UTC(datetime.tzinfo):
-    """UTC"""
-
-    def utcoffset(self, dt):
-        return _ZERO
-
-    def tzname(self, dt):
-        return "UTC"
-
-    def dst(self, dt):
-        return _ZERO
-
-utc = UTC()
-
-
 class SubunitTerminalReporter(TerminalReporter):
-    def __init__(self, reporter):
-        TerminalReporter.__init__(self, reporter.config)
+    def __init__(self, reporter, subunit_path):
+        super().__init__(reporter.config)
         self.writer = self._tw
         self.tests_count = 0
         self.reports = []
         self.skipped = []
         self.failed = []
-        self.result = StreamResultToBytes(self.writer._file)
+
+        self.subunit_file = open(subunit_path, "ab")
 
     def _status(self, report, status):
         # task id
         test_id = report.nodeid
 
-        # get time
-        now = datetime.datetime.now(utc)
-
-        # capture output
-        out = io.StringIO()
-        writer = TerminalWriter(out)
+        summary = io.StringIO()
+        writer = TerminalWriter(summary)
         report.toterminal(writer)
-
         writer.flush()
 
-        # send status
-        self.result.status(test_id=test_id,
-                           test_status=status,
-                           timestamp=now,
-                           file_name=report.fspath,
-                           file_bytes=out.getvalue().encode('utf8'),
-                           mime_type="text/plain; charset=utf8")
+        out_report = f"""
+---------------------------------- summary -----------------------------------
+{summary.getvalue()}
+------------------------------- captured log ---------------------------------
+{report.caplog}
+------------------------------ captured stdout -------------------------------
+{report.capstdout}
+------------------------------ captured stderr -------------------------------
+{report.capstderr}
+"""
 
-    def pytest_collectreport(self, report):
-        pass
-
-    def pytest_runtest_logfinish(self, nodeid: str) -> None:
-        pass
-
-    def pytest_collection_finish(self, session):
-        if self.config.option.collectonly:
-            self._printcollecteditems(session.items)
-
-    def pytest_collection(self):
-        # Prevent shoving `collecting` message
-        pass
-
-    def report_collect(self, final=False):
-        # Prevent shoving `collecting` message
-        pass
-
-    def pytest_sessionstart(self, session):
-        pass
-
-    def pytest_runtest_logstart(self, nodeid, location):
-        pass
-
-    def pytest_sessionfinish(self, session, exitstatus):
-        # always exit with exitcode 0
-        session.exitstatus = 0
+        result = StreamResultToBytes(self.subunit_file)
+        result.startTestRun()
+        result.status(
+            test_id=test_id,
+            timestamp=datetime.datetime.fromtimestamp(
+                report.start, datetime.timezone.utc))
+        result.status(
+            test_id=test_id,
+            test_status=status,
+            timestamp=datetime.datetime.fromtimestamp(
+                report.stop, datetime.timezone.utc),
+            file_name="summary",
+            file_bytes=out_report.encode('utf8'),
+            mime_type="text/plain; charset=utf8")
+        result.stopTestRun()
 
     def pytest_runtest_logreport(self, report):
+        super().pytest_runtest_logreport(report)
+
         self.reports.append(report)
         test_id = report.nodeid
         if report.when in ['setup', 'session']:
@@ -193,21 +165,3 @@ class SubunitTerminalReporter(TerminalReporter):
                     self._status(report, 'fail')
         else:
             raise Exception(str(report))
-
-    def _printcollecteditems(self, items):
-        for item in items:
-            test_id = item.nodeid
-            self.result.status(test_id=test_id, test_status='exists')
-
-    def summary_stats(self):
-        pass
-
-    def summary_failures(self):
-        # Prevent failure summary from being shown since we already
-        # show the failure instantly after failure has occured.
-        pass
-
-    def summary_errors(self):
-        # Prevent error summary from being shown since we already
-        # show the error instantly after error has occured.
-        pass
